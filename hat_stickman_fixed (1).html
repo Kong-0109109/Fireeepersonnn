@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>帽子火柴人：垂直攻頂</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #222; font-family: Arial, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; }
+        canvas { display: block; background: linear-gradient(to bottom, #87CEEB, #E0F6FF); margin: 0 auto; border: 4px solid #444; max-width: 100vw; }
+        #ui { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); color: #333; background: rgba(255,255,255,0.7); padding: 8px 14px; border-radius: 5px; z-index: 10; white-space: nowrap; }
+
+        /* ── Mobile viewport ── */
+        html, body { height: 100%; touch-action: none; }
+
+        /* ── Touch controls overlay ── */
+        #touch-controls {
+            position: fixed;
+            bottom: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 400px;
+            height: 160px;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        /* Left arrow */
+        #btn-left {
+            position: absolute;
+            left: 16px;
+            bottom: 20px;
+        }
+
+        /* Right arrow */
+        #btn-right {
+            position: absolute;
+            left: 110px;
+            bottom: 20px;
+        }
+
+        /* Jump button — right side, big */
+        #btn-jump {
+            position: absolute;
+            right: 16px;
+            bottom: 20px;
+            width: 90px;
+            height: 90px;
+            font-size: 36px;
+            background: rgba(255, 220, 50, 0.55);
+            border-color: rgba(200,160,0,0.6);
+        }
+
+        .touch-btn {
+            background: rgba(255,255,255,0.35);
+            border: 3px solid rgba(255,255,255,0.6);
+            border-radius: 50%;
+            width: 75px;
+            height: 75px;
+            font-size: 30px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            pointer-events: all;
+            user-select: none;
+            -webkit-user-select: none;
+            cursor: pointer;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            transition: background 0.1s, transform 0.1s;
+            position: absolute;
+        }
+
+        .touch-btn:active, .touch-btn.pressed {
+            background: rgba(255,255,255,0.65);
+            transform: scale(0.92);
+        }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        關卡: <span id="level">1</span> / 20 <br>
+        難度: <span id="difficulty">簡單</span>
+    </div>
+    <canvas id="gameCanvas"></canvas>
+
+    <!-- Touch controls for mobile: Left/Right on left side, Jump on right side -->
+    <div id="touch-controls">
+        <div class="touch-btn" id="btn-left">◀</div>
+        <div class="touch-btn" id="btn-right">▶</div>
+        <div class="touch-btn" id="btn-jump">▲</div>
+    </div>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const levelDisplay = document.getElementById('level');
+const diffDisplay = document.getElementById('difficulty');
+
+canvas.width = 400;
+canvas.height = 600;
+
+// Scale canvas to fit phone screen while keeping aspect ratio
+function resizeCanvas() {
+    const maxW = window.innerWidth;
+    const maxH = window.innerHeight - 170; // leave room for touch controls
+    const scale = Math.min(maxW / 400, maxH / 600);
+    canvas.style.width  = (400 * scale) + 'px';
+    canvas.style.height = (600 * scale) + 'px';
+    // Keep touch controls same width as displayed canvas
+    document.getElementById('touch-controls').style.width = (400 * scale) + 'px';
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+// Constants
+const SPAWN_X = 200;
+const SPAWN_Y = 540;  // Consistent spawn position constant
+
+// 遊戲變數
+let currentLevel = 1;
+const gravity = 0.5;
+const player = {
+    x: SPAWN_X, y: SPAWN_Y, w: 20, h: 40,
+    vx: 0, vy: 0, speed: 5, jumpPower: -12,  // FIX: increased jumpPower slightly for better feel
+    onGround: false
+};
+
+let platforms = [];
+
+// FIX: Added "中等" (Medium) difficulty tier between Easy and Hard
+function getDifficulty(lvl) {
+    if (lvl <= 5)  return { name: "簡單",   color: "#4CAF50", width: 80 };
+    if (lvl <= 10) return { name: "中等",   color: "#2196F3", width: 65 };
+    if (lvl <= 15) return { name: "困難",   color: "#FF9800", width: 50 };
+    return              { name: "地獄級", color: "#F44336", width: 30 };
+}
+
+// FIX: Player reset extracted to helper to avoid code duplication
+function resetPlayer() {
+    player.x = SPAWN_X;
+    player.y = SPAWN_Y;
+    player.vx = 0;
+    player.vy = 0;
+    player.onGround = false;
+}
+
+// 初始化關卡
+function initLevel(lvl) {
+    platforms = [];
+    const diff = getDifficulty(lvl);
+    levelDisplay.innerText = lvl;
+    diffDisplay.innerText = diff.name;
+    diffDisplay.style.color = diff.color;
+
+    // 地板
+    platforms.push({ x: 0, y: 580, w: 400, h: 20 });
+
+    // FIX: Ensure platforms are evenly spaced with minimum gap (no overlap or near-stack)
+    const totalPlatforms = 7;
+    const topY = 80;
+    const bottomY = 500;
+    const step = (bottomY - topY) / (totalPlatforms - 1);
+
+    for (let i = 0; i < totalPlatforms; i++) {
+        const baseY = bottomY - (i * step);
+        // Add a small random offset but cap it so platforms stay well separated
+        const offsetY = (Math.random() - 0.5) * (step * 0.4);
+        const platY = baseY + offsetY;
+
+        // FIX: Moving speed uses fixed value with random sign instead of Math.random()*2
+        // to avoid near-zero speed making platforms appear stationary
+        const movingSpeed = lvl > 8
+            ? (Math.random() > 0.5 ? 1.5 : -1.5) * (1 + (lvl - 8) * 0.05)
+            : 0;
+
+        platforms.push({
+            x: Math.random() * (canvas.width - diff.width),
+            y: platY,
+            w: diff.width,
+            h: 10,
+            moving: movingSpeed
+        });
+    }
+
+    // 終點 (旗杆/goal)
+    platforms.push({ x: 180, y: 30, w: 40, h: 10, isGoal: true });
+}
+
+// 繪製火柴人
+function drawPlayer() {
+    ctx.strokeStyle = "#000";
+    ctx.lineWidth = 2;
+
+    // 軀幹 (torso)
+    ctx.beginPath();
+    ctx.moveTo(player.x + 10, player.y + 15);
+    ctx.lineTo(player.x + 10, player.y + 30);
+    ctx.stroke();
+
+    // 頭 (head)
+    ctx.beginPath();
+    ctx.arc(player.x + 10, player.y + 10, 5, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // FIX: Added arms (were missing from original)
+    ctx.beginPath();
+    ctx.moveTo(player.x + 10, player.y + 18);
+    ctx.lineTo(player.x, player.y + 24);       // left arm
+    ctx.moveTo(player.x + 10, player.y + 18);
+    ctx.lineTo(player.x + 20, player.y + 24);  // right arm
+    ctx.stroke();
+
+    // 腳 (legs)
+    ctx.beginPath();
+    ctx.moveTo(player.x + 10, player.y + 30);
+    ctx.lineTo(player.x, player.y + 40);
+    ctx.moveTo(player.x + 10, player.y + 30);
+    ctx.lineTo(player.x + 20, player.y + 40);
+    ctx.stroke();
+
+    // 帽子 (top hat)
+    ctx.fillStyle = "black";
+    ctx.fillRect(player.x, player.y, 20, 3);          // brim
+    ctx.fillRect(player.x + 5, player.y - 7, 10, 7);  // crown
+}
+
+function update() {
+    // 物理位移
+    player.vy += gravity;
+    player.y += player.vy;
+    player.x += player.vx;
+
+    // 邊界限制
+    if (player.x < 0) player.x = 0;
+    if (player.x > canvas.width - player.w) player.x = canvas.width - player.w;
+
+    // 碰撞檢測
+    player.onGround = false;
+    platforms.forEach(p => {
+        // 移動平台邏輯
+        if (p.moving) {
+            p.x += p.moving;
+            if (p.x <= 0 || p.x + p.w >= canvas.width) p.moving *= -1;
+        }
+
+        // FIX: Changed p.vy to p.h — p.vy was undefined on platforms,
+        // causing erratic collision detection (the main bug)
+        if (player.vy > 0 &&
+            player.x + player.w > p.x &&
+            player.x < p.x + p.w &&
+            player.y + player.h > p.y &&
+            player.y + player.h < p.y + p.h + 5) {
+
+            player.y = p.y - player.h;
+            player.vy = 0;
+            player.onGround = true;
+
+            if (p.isGoal) {
+                if (currentLevel < 20) {
+                    currentLevel++;
+                    // FIX: Full player reset (x, vx, vy) on level advance
+                    resetPlayer();
+                    initLevel(currentLevel);
+                } else {
+                    alert("恭喜通關地獄級！你已經登頂了！");
+                    currentLevel = 1;
+                    // FIX: Full player reset on game restart too
+                    resetPlayer();
+                    initLevel(1);
+                }
+            }
+        }
+    });
+
+    // 掉落死亡 (回關卡起點)
+    if (player.y > canvas.height) {
+        resetPlayer();  // FIX: Use resetPlayer() for consistency
+    }
+}
+
+function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // 繪製平台
+    platforms.forEach(p => {
+        ctx.fillStyle = p.isGoal ? "gold" : "#5D4037";
+        ctx.fillRect(p.x, p.y, p.w, p.h);
+
+        // Draw flag on goal platform
+        if (p.isGoal) {
+            ctx.strokeStyle = "#333";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(p.x + p.w / 2, p.y);
+            ctx.lineTo(p.x + p.w / 2, p.y - 20);
+            ctx.stroke();
+            ctx.fillStyle = "red";
+            ctx.beginPath();
+            ctx.moveTo(p.x + p.w / 2, p.y - 20);
+            ctx.lineTo(p.x + p.w / 2 + 12, p.y - 14);
+            ctx.lineTo(p.x + p.w / 2, p.y - 8);
+            ctx.fill();
+        }
+    });
+
+    drawPlayer();
+}
+
+// 鍵盤控制
+const keys = {};
+window.addEventListener('keydown', e => {
+    keys[e.code] = true;
+    if ((e.code === 'Space' || e.code === 'ArrowUp') && player.onGround) {
+        player.vy = player.jumpPower;
+    }
+});
+window.addEventListener('keyup', e => keys[e.code] = false);
+
+// ── Touch controls — multi-touch safe ──────────────────────────────────────
+// Track which DOM element each active touch belongs to
+const touchMap = {};  // touchId → button element
+
+function btnDown(btn, action) {
+    btn.classList.add('pressed');
+    if (action === 'left')  keys['ArrowLeft']  = true;
+    if (action === 'right') keys['ArrowRight'] = true;
+    if (action === 'jump' && player.onGround)  player.vy = player.jumpPower;
+}
+function btnUp(btn, action) {
+    btn.classList.remove('pressed');
+    if (action === 'left')  keys['ArrowLeft']  = false;
+    if (action === 'right') keys['ArrowRight'] = false;
+}
+
+function setupBtn(id, action) {
+    const btn = document.getElementById(id);
+
+    // Touch events — multi-touch safe
+    btn.addEventListener('touchstart', e => {
+        e.preventDefault();
+        for (const t of e.changedTouches) touchMap[t.identifier] = { btn, action };
+        btnDown(btn, action);
+    }, { passive: false });
+
+    btn.addEventListener('touchend', e => {
+        e.preventDefault();
+        for (const t of e.changedTouches) delete touchMap[t.identifier];
+        // Only release if no other finger is still on this button
+        const stillHeld = Object.values(touchMap).some(v => v.btn === btn);
+        if (!stillHeld) btnUp(btn, action);
+    }, { passive: false });
+
+    btn.addEventListener('touchcancel', e => {
+        e.preventDefault();
+        for (const t of e.changedTouches) delete touchMap[t.identifier];
+        btnUp(btn, action);
+    }, { passive: false });
+
+    // Mouse fallback for desktop testing
+    btn.addEventListener('mousedown', e => { e.preventDefault(); btnDown(btn, action); });
+    btn.addEventListener('mouseup',   e => { e.preventDefault(); btnUp(btn, action);   });
+    btn.addEventListener('mouseleave',e => { btnUp(btn, action); });
+}
+
+setupBtn('btn-left',  'left');
+setupBtn('btn-right', 'right');
+setupBtn('btn-jump',  'jump');
+
+function gameLoop() {
+    player.vx = 0;
+    if (keys['ArrowLeft'])  player.vx = -player.speed;
+    if (keys['ArrowRight']) player.vx =  player.speed;
+
+    update();
+    draw();
+    requestAnimationFrame(gameLoop);
+}
+
+initLevel(1);
+gameLoop();
+</script>
+</body>
+</html>
